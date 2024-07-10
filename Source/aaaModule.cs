@@ -10,11 +10,176 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 
 namespace Celeste.Mod.aaa;
+//https://stackoverflow.com/questions/1312166/print-full-signature-of-a-method-from-a-methodinfo
+public static class MethodInfoExtensions
+{
+    /// <summary>
+    /// Return the method signature as a string.
+    /// </summary>
+    /// <param name="method">The Method</param>
+    /// <param name="callable">Return as an callable string(public void a(string b) would return a(b))</param>
+    /// <returns>Method signature</returns>
+    public static string GetSignature(this MethodInfo method, bool callable = false)
+    {
+        var firstParam = true;
+        var sigBuilder = new StringBuilder();
+        if (callable == false)
+        {
+            //if (method.IsPublic)
+            //{
+            //    sigBuilder.Append("public ");
+            //}
+            //else if (method.IsPrivate)
+            //{
+            //    sigBuilder.Append("private ");
+            //}
+            //else if (method.IsAssembly)
+            //{
+            //    sigBuilder.Append("internal ");
+            //}
+            //
+            //if (method.IsFamily)
+            //{
+            //    sigBuilder.Append("protected ");
+            //}
+            //
+            //if (method.IsStatic)
+            //{
+            //    sigBuilder.Append("static ");
+            //}
+
+            sigBuilder.Append(TypeName(method.ReturnType));
+            sigBuilder.Append(' ');
+        }
+
+        sigBuilder.Append(TypeName(method.DeclaringType));
+        sigBuilder.Append('.');
+        sigBuilder.Append(method.Name);
+
+        // Add method generics
+        if (method.IsGenericMethod)
+        {
+            sigBuilder.Append("<");
+            foreach (var g in method.GetGenericArguments())
+            {
+                if (firstParam)
+                {
+                    firstParam = false;
+                }
+                else
+                {
+                    sigBuilder.Append(", ");
+                }
+
+                sigBuilder.Append(TypeName(g));
+            }
+            sigBuilder.Append(">");
+        }
+        sigBuilder.Append("(");
+        firstParam = true;
+        var secondParam = false;
+        foreach (var param in method.GetParameters())
+        {
+            if (firstParam)
+            {
+                firstParam = false;
+                if (method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false))
+                {
+                    if (callable)
+                    {
+                        secondParam = true;
+                        continue;
+                    }
+                    sigBuilder.Append("this ");
+                }
+            }
+            else if (secondParam == true)
+            {
+                secondParam = false;
+            }
+            else
+            {
+                sigBuilder.Append(", ");
+            }
+
+            if (param.ParameterType.IsByRef)
+            {
+                sigBuilder.Append("ref ");
+            }
+            else if (param.IsOut)
+            {
+                sigBuilder.Append("out ");
+            }
+
+            if (!callable)
+            {
+                sigBuilder.Append(TypeName(param.ParameterType));
+                sigBuilder.Append(' ');
+            }
+            sigBuilder.Append(param.Name);
+        }
+        sigBuilder.Append(") @")
+            //.Append(method.Module.Assembly.GetName().Name)
+            .Append(method.Module.ScopeName)
+            ;
+        return sigBuilder.ToString();
+    }
+
+    /// <summary>
+    /// Get full type name with full namespace names
+    /// </summary>
+    /// <param name="type">Type. May be generic or nullable</param>
+    /// <returns>Full type name, fully qualified namespaces</returns>
+    public static string TypeName(Type type)
+    {
+        var nullableType = Nullable.GetUnderlyingType(type);
+        if (nullableType != null)
+        {
+            return nullableType.Name + "?";
+        }
+
+        if (!(type.IsGenericType && type.Name.Contains('`')))
+        {
+            switch (type.Name)
+            {
+                case "String": return "string";
+                case "Int32": return "int";
+                case "Decimal": return "decimal";
+                case "Object": return "object";
+                case "Void": return "void";
+                default:
+                    {
+                        return string.IsNullOrWhiteSpace(type.FullName) ? type.Name : type.FullName;
+                    }
+            }
+        }
+
+        var sb = new StringBuilder(type.Name[..type.Name.IndexOf('`')]
+        );
+        sb.Append('<');
+        var first = true;
+        foreach (var t in type.GetGenericArguments())
+        {
+            if (!first)
+            {
+                sb.Append(',');
+            }
+
+            sb.Append(TypeName(t));
+            first = false;
+        }
+        sb.Append('>');
+        return sb.ToString();
+    }
+
+}
 
 public class aaaModule : EverestModule
 {
+
     public static aaaModule Instance { get; private set; }
 
     public override Type SettingsType => typeof(aaaModuleSettings);
@@ -38,7 +203,13 @@ public class aaaModule : EverestModule
 #endif
     }
     static int Bottom = 0;
-
+    const BindingFlags bf = 0
+        | BindingFlags.Public
+        | BindingFlags.NonPublic
+        | BindingFlags.Instance
+        | BindingFlags.Static;
+    static MethodInfo ReflRefreshHooks = typeof(aaaModule).GetMethod(nameof(RefreshHooks), bf);
+    static MethodInfo ReflGetOrig = typeof(aaaModule).GetMethod(nameof(GetOrig), bf);
     static void AddLogger(ILContext il)
     {
         ILCursor ic = new(il);
@@ -54,6 +225,11 @@ public class aaaModule : EverestModule
             for (int i = 3; i < stackTrace.FrameCount; i++)
             {
                 var frame = stackTrace.GetFrame(i)!;
+                if (frame.GetMethod() == ReflRefreshHooks || frame.GetMethod() == ReflGetOrig)
+                {
+                    break;
+                }
+
                 var info = new LogInfo()
                 {
                     ILOffset = frame.GetILOffset(),
@@ -93,6 +269,26 @@ public class aaaModule : EverestModule
         public int FileRow;
         public int FileCol;
         public LogInfo? ILHookStackTraceNextFrame;
+        public static bool operator ==(LogInfo? l, LogInfo? r)
+        {
+            return (l is null, r is null) switch
+            {
+                (false, false) => l.Method == r.Method && l.ILOffset == r.ILOffset &&
+                l.ILHookStackTraceNextFrame == r.ILHookStackTraceNextFrame,
+                (true, true) => true,
+                _ => false,
+            };
+        }
+        public static bool operator !=(LogInfo l, LogInfo r) => !(l == r);
+
+        public override bool Equals(object obj)
+        {
+            if (obj is LogInfo info)
+            {
+                return info == this;
+            }
+            return base.Equals(obj);
+        }
     }
     struct ManipInfo
     {
@@ -117,6 +313,10 @@ public class aaaModule : EverestModule
     static Dictionary<ManipInfo, List<LogInfo>> LatestManipLogs = [];
     static Dictionary<ManipInfo, List<LogInfo>> OrigManipLogs = [];
 
+    static Dictionary<ManipInfo, (List<LogInfo> now, List<LogInfo> orig)> Difference = [];
+    static List<string> DifferenceToString = [];
+
+
     static List<ILHook> ills = [];
     static List<Hook> ls = [];
     public static void GetOrig()
@@ -137,15 +337,42 @@ public class aaaModule : EverestModule
     {
         Prepare();
         RefreshHooks();
+        IgnoreMonoMod();
         GetOrig();
         Compare();
         Debugger.Launch();
         Clear();
     }
 
+    private static void IgnoreMonoMod()
+    {
+        var toremove = LatestManipLogs.Where(x =>
+        {
+            var t = x.Key.Target.DeclaringType;
+            if (t == typeof(ILCursor) || t == typeof(DynamicMethodDefinition) || t == typeof(ILContext))
+            {
+                return false;
+            }
+            return true;
+        });
+    }
+
     private static void Compare()
     {
-        
+        Difference.Clear();
+        DifferenceToString.Clear();
+        foreach (var (manip, now, orig) in
+            LatestManipLogs.Select(z => (z.Key, z.Value, OrigManipLogs[z.Key])))
+        {
+            if (!now.SequenceEqual(orig))
+            {
+                Difference[manip] = (now, orig);
+            }
+        }
+        foreach (var (manip, t) in Difference)
+        {
+            DifferenceToString.Add(manip.Manip.Method.GetSignature());
+        }
     }
 
     private static Lazy<FieldInfo> DetourManager_detourStates = new(() => typeof(DetourManager).GetField("detourStates", BindingFlags.Static | BindingFlags.NonPublic)!);
@@ -204,6 +431,7 @@ public class aaaModule : EverestModule
             }
             catch (Exception)
             {
+                // Generic Method
             }
         }
         ls.Add(new(typeof(DynamicMethodDefinition).GetConstructor([typeof(MethodBase)])!,
