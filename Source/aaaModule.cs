@@ -281,13 +281,22 @@ public class aaaModule : EverestModule
         }
         public static bool operator !=(LogInfo l, LogInfo r) => !(l == r);
 
-        public override bool Equals(object obj)
+        public override bool Equals(object? obj)
         {
             if (obj is LogInfo info)
             {
                 return info == this;
             }
             return base.Equals(obj);
+        }
+
+        public override int GetHashCode()
+        {
+            return ILHookStackTraceNextFrame switch
+            {
+                null => HashCode.Combine(Method, ILOffset),
+                _ => HashCode.Combine(Method, ILOffset, ILHookStackTraceNextFrame),
+            };
         }
     }
     struct ManipInfo
