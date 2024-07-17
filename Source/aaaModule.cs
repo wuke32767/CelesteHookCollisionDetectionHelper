@@ -393,18 +393,23 @@ public class aaaModule : EverestModule
         (Mod, ModReport) = BuildReport(empty);
     }
 
+    static List<ManipInfo> orig_Empty = [];
     static Dictionary<Module, Dictionary<ManipInfo, List<LogHead>>> Empty = [];
     static string EmptyReport;
     private static void IsEmpty()
     {
-        Dictionary<ManipInfo, List<LogHead>> empty = [];
-        foreach (var (manip, log) in LatestManipLogs)
+        var empty = new Dictionary<ManipInfo, List<LogHead>>();
+        foreach (var i in orig_Empty)
         {
-            if (!log.Any(x => x.HasChanges()))
-            {
-                empty.Add(manip, log);
-            }
+            empty.Add(i, LatestManipLogs[i]);
         }
+        //foreach (var (manip, log) in LatestManipLogs)
+        //{
+        //    if (!log.Any(x => x.HasChanges()))
+        //    {
+        //        empty.Add(manip, log);
+        //    }
+        //}
         (Empty, EmptyReport) = BuildReport(empty);
     }
 
@@ -482,6 +487,28 @@ public class aaaModule : EverestModule
     private static Lazy<FieldInfo> DetourManager_detourStates = new(() => typeof(DetourManager).GetField("detourStates", BindingFlags.Static | BindingFlags.NonPublic)!);
     static Func<object, object>? fun1;
     static Func<object, ILContext.Manipulator>? fun2;
+    struct LightWeightInstructuion(Instruction i)
+    {
+        internal OpCode opcode = i.OpCode;
+        internal object operand = i.Operand switch
+        {
+            Instruction ii => ii.Offset,
+            Instruction[] ii => ii.Select(x => x.Offset).ToArray(),
+            { } ii => ii,
+            null => null!,
+        };
+
+        public override bool Equals(object? obj)
+        {
+            return obj is LightWeightInstructuion instructuion &&
+                   opcode.Equals(instructuion.opcode) &&
+                   (operand switch
+                   {
+                       int[] ar => ar.SequenceEqual(instructuion.operand as int[] ?? [-1]),
+                       _ => EqualityComparer<object>.Default.Equals(operand, instructuion.operand)
+                   });
+        }
+    }
     private static void RefreshHooks()
     {
         // Replay all hooks.
@@ -504,6 +531,7 @@ public class aaaModule : EverestModule
                 return;
             }
 
+            var orig_instrs = cloneDefContext.Instrs.Select(x => new LightWeightInstructuion(x)).ToArray();
             foreach (var hook in hooked)
             {
                 // ILHookInfo only gives us public access to the method the manipulator delegate calls.
@@ -518,12 +546,16 @@ public class aaaModule : EverestModule
                 {
                     cloneDefContext.Invoke(manipulator);
 
-                    var instrs = cloneDefContext.Instrs;
-
+                    var instrs = cloneDefContext.Instrs.Select(x => new LightWeightInstructuion(x)).ToArray();
+                    if (instrs.SequenceEqual(orig_instrs))
+                    {
+                        orig_Empty.Add(Current);
+                    }
+                    orig_instrs = instrs;
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log(LogLevel.Error,"USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
+                    Logger.Log(LogLevel.Error, "USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
                 }
             }
         }
