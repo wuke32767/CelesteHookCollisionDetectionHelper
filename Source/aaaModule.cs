@@ -1,6 +1,7 @@
 ﻿using AsmResolver.PE.DotNet.Metadata.Tables.Rows;
 using Mono.Cecil.Cil;
 using MonoMod.Cil;
+using MonoMod.Core.Platforms;
 using MonoMod.RuntimeDetour;
 using MonoMod.Utils;
 using System;
@@ -13,47 +14,28 @@ using System.Reflection;
 using System.Text;
 
 namespace Celeste.Mod.aaa;
-//https://stackoverflow.com/questions/1312166/print-full-signature-of-a-method-from-a-methodinfo
+
 public static class MethodInfoExtensions
 {
+    public static bool IsFromCeleste(this MethodBase method)
+    {
+        if (method?.Module == typeof(Celeste).Module)
+        {
+            return true;
+        }
+        return false;
+    }
+    //https://stackoverflow.com/questions/1312166/print-full-signature-of-a-method-from-a-methodinfo
     /// <summary>
     /// Return the method signature as a string.
     /// </summary>
     /// <param name="method">The Method</param>
     /// <param name="callable">Return as an callable string(public void a(string b) would return a(b))</param>
     /// <returns>Method signature</returns>
-    public static string GetSignature(this MethodInfo method, bool callable = false)
+    public static string GetSignature(this MethodBase method, bool callable = false, bool source = true, bool celeste = true)
     {
         var firstParam = true;
         var sigBuilder = new StringBuilder();
-        if (callable == false)
-        {
-            //if (method.IsPublic)
-            //{
-            //    sigBuilder.Append("public ");
-            //}
-            //else if (method.IsPrivate)
-            //{
-            //    sigBuilder.Append("private ");
-            //}
-            //else if (method.IsAssembly)
-            //{
-            //    sigBuilder.Append("internal ");
-            //}
-            //
-            //if (method.IsFamily)
-            //{
-            //    sigBuilder.Append("protected ");
-            //}
-            //
-            //if (method.IsStatic)
-            //{
-            //    sigBuilder.Append("static ");
-            //}
-
-            sigBuilder.Append(TypeName(method.ReturnType));
-            sigBuilder.Append(' ');
-        }
 
         sigBuilder.Append(TypeName(method.DeclaringType));
         sigBuilder.Append('.');
@@ -62,7 +44,7 @@ public static class MethodInfoExtensions
         // Add method generics
         if (method.IsGenericMethod)
         {
-            sigBuilder.Append("<");
+            sigBuilder.Append('<');
             foreach (var g in method.GetGenericArguments())
             {
                 if (firstParam)
@@ -76,58 +58,22 @@ public static class MethodInfoExtensions
 
                 sigBuilder.Append(TypeName(g));
             }
-            sigBuilder.Append(">");
+            sigBuilder.Append('>');
         }
-        sigBuilder.Append("(");
-        firstParam = true;
-        var secondParam = false;
-        foreach (var param in method.GetParameters())
+
+        if (source)
         {
-            if (firstParam)
+            if ((!method.IsFromCeleste()) || celeste)
             {
-                firstParam = false;
-                if (method.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false))
-                {
-                    if (callable)
-                    {
-                        secondParam = true;
-                        continue;
-                    }
-                    sigBuilder.Append("this ");
-                }
+                sigBuilder.Append(" @")
+                //.Append(method.Module.Assembly.GetName().Name)
+                .Append(method.Module.ScopeName)
+                ;
             }
-            else if (secondParam == true)
-            {
-                secondParam = false;
-            }
-            else
-            {
-                sigBuilder.Append(", ");
-            }
-
-            if (param.ParameterType.IsByRef)
-            {
-                sigBuilder.Append("ref ");
-            }
-            else if (param.IsOut)
-            {
-                sigBuilder.Append("out ");
-            }
-
-            if (!callable)
-            {
-                sigBuilder.Append(TypeName(param.ParameterType));
-                sigBuilder.Append(' ');
-            }
-            sigBuilder.Append(param.Name);
         }
-        sigBuilder.Append(") @")
-            //.Append(method.Module.Assembly.GetName().Name)
-            .Append(method.Module.ScopeName)
-            ;
         return sigBuilder.ToString();
     }
-
+    //https://stackoverflow.com/questions/1312166/print-full-signature-of-a-method-from-a-methodinfo
     /// <summary>
     /// Get full type name with full namespace names
     /// </summary>
@@ -175,6 +121,18 @@ public static class MethodInfoExtensions
         return sb.ToString();
     }
 
+    public static string ToOperation(this MethodBase method)
+    {
+        return $"{method.Name}({new string(
+                        method
+                        .GetParameters()
+                        .SelectMany(x =>
+                            x.ParameterType.Name.Append(' ')
+                            .Concat((x.Name ?? "Unnamed").Append(',')))
+                        .SkipLast(1)
+                        .ToArray())})";
+    }
+
 }
 
 public class aaaModule : EverestModule
@@ -210,10 +168,10 @@ public class aaaModule : EverestModule
         | BindingFlags.Static;
     static MethodInfo ReflRefreshHooks = typeof(aaaModule).GetMethod(nameof(RefreshHooks), bf);
     static MethodInfo ReflGetOrig = typeof(aaaModule).GetMethod(nameof(GetOrig), bf);
-    static void AddLogger(ILContext il)
+    static void AddLogger(ILContext il, string operation)
     {
         ILCursor ic = new(il);
-        static void localmethod()
+        void localmethod()
         {
             Bottom++;
             if (Bottom != 1)
@@ -230,15 +188,14 @@ public class aaaModule : EverestModule
                     break;
                 }
 
-                var info = new LogInfo()
+                infos.Add(new LogInfo()
                 {
                     ILOffset = frame.GetILOffset(),
                     Method = frame.GetMethod()!,
                     File = frame.GetFileName()!,
                     FileRow = frame.GetFileLineNumber(),
                     FileCol = frame.GetFileColumnNumber(),
-                };
-                infos.Add(info);
+                });
                 if (frame.GetMethod() == Current.Manip?.Method)
                 {
                     break;
@@ -250,15 +207,81 @@ public class aaaModule : EverestModule
                 tar.ILHookStackTraceNextFrame = info;
                 tar = info;
             }
-            CurrentManipLogs.Add(infos[0]);
+            var head = new LogHead() { Operation = operation, BeforeTrim = infos[0], CallStack = infos[0] };
+            if (CurrentManipLogs.Count == 0 || !CurrentManipLogs[^1].OrigSame(head))
+            {
+                CurrentManipLogs.Add(head.FixGeneric());
+            }
         };
+#pragma warning disable CL0002 // Instance method passed to EmitDelegate
         ic.EmitDelegate(localmethod);
+#pragma warning restore CL0002 // Instance method passed to EmitDelegate
 
         while (ic.TryGotoNext(MoveType.AfterLabel, i => i.MatchRet()))
         {
             static void reset() => Bottom--;
             ic.EmitDelegate(reset);
             ic.Index++;
+        }
+
+    }
+    class LogHead
+    {
+        static Dictionary<MethodBase, string> trimDir = [];
+        public required string Operation;
+        public required LogInfo CallStack;
+        public required LogInfo BeforeTrim;
+
+        public static bool operator ==(LogHead l, LogHead r)
+        {
+            return l.Operation == r.Operation &&
+                l.CallStack == r.CallStack;
+        }
+        static Module MonoModUtilsModule = typeof(ILCursor).Module;
+        public bool OrigSame(LogHead r)
+        {
+            return Operation == r.Operation &&
+                BeforeTrim == r.BeforeTrim;
+        }
+        public LogHead FixGeneric()
+        {
+            string GetTrimResult(MethodBase method)
+            {
+                if (trimDir.TryGetValue(method, out var ret))
+                {
+                    return ret;
+                }
+                return trimDir[method] = method.ToOperation();
+            }
+
+            while (CallStack?.Method.Module == MonoModUtilsModule)
+            {
+                Operation = GetTrimResult(CallStack.Method);
+                CallStack = CallStack.ILHookStackTraceNextFrame!;
+            }
+            return this;
+        }
+        public static bool operator !=(LogHead l, LogHead r) => !(l == r);
+        public override bool Equals(object? obj)
+        {
+            if (obj is LogHead info)
+            {
+                return info == this;
+            }
+            return base.Equals(obj);
+        }
+
+        public override int GetHashCode()
+        {
+            return CallStack switch
+            {
+                null => HashCode.Combine(Operation),
+                _ => HashCode.Combine(Operation, CallStack),
+            };
+        }
+        public bool HasChanges()
+        {
+            return Operation.StartsWith("_Insert(") || Operation.StartsWith("Emit") || Operation.StartsWith("Remove");
         }
     }
     class LogInfo
@@ -317,14 +340,13 @@ public class aaaModule : EverestModule
         }
     }
     static ManipInfo Current;
-    static List<LogInfo> CurrentManipLogs = [];
+    static List<LogHead> CurrentManipLogs = [];
 
-    static Dictionary<ManipInfo, List<LogInfo>> LatestManipLogs = [];
-    static Dictionary<ManipInfo, List<LogInfo>> OrigManipLogs = [];
+    static Dictionary<ManipInfo, List<LogHead>> LatestManipLogs = [];
+    static Dictionary<ManipInfo, List<LogHead>> OrigManipLogs = [];
 
-    static Dictionary<ManipInfo, (List<LogInfo> now, List<LogInfo> orig)> Difference = [];
+    static Dictionary<ManipInfo, (List<LogHead> now, List<LogHead> orig)> Difference = [];
     static List<string> DifferenceToString = [];
-
 
     static List<ILHook> ills = [];
     static List<Hook> ls = [];
@@ -345,25 +367,98 @@ public class aaaModule : EverestModule
     public static void GetCollision()
     {
         Prepare();
+        //GetDMD();
+        Debugger.Launch();
         RefreshHooks();
-        IgnoreMonoMod();
+        IgnoreSelf();
         GetOrig();
         Compare();
-        Debugger.Launch();
+        IsEmpty();
+        Interop();
         Clear();
     }
+    static Dictionary<Module, Dictionary<ManipInfo, List<LogHead>>> Mod = [];
+    static string ModReport;
 
-    private static void IgnoreMonoMod()
+    private static void Interop()
+    {
+        Dictionary<ManipInfo, List<LogHead>> empty = [];
+        foreach (var (manip, log) in LatestManipLogs)
+        {
+            if (!manip.Target.IsFromCeleste())
+            {
+                empty.Add(manip, log);
+            }
+        }
+        (Mod, ModReport) = BuildReport(empty);
+    }
+
+    static Dictionary<Module, Dictionary<ManipInfo, List<LogHead>>> Empty = [];
+    static string EmptyReport;
+    private static void IsEmpty()
+    {
+        Dictionary<ManipInfo, List<LogHead>> empty = [];
+        foreach (var (manip, log) in LatestManipLogs)
+        {
+            if (!log.Any(x => x.HasChanges()))
+            {
+                empty.Add(manip, log);
+            }
+        }
+        (Empty, EmptyReport) = BuildReport(empty);
+    }
+
+    private static (Dictionary<Module, Dictionary<ManipInfo, List<LogHead>>>, string) BuildReport(Dictionary<ManipInfo, List<LogHead>> empty)
+    {
+        var Empty = empty.GroupBy(x => x.Key.Manip.Method.Module, x => (x.Key, x.Value)).ToDictionary(x => x.Key, x => x.ToDictionary(x => x.Key, x => x.Value));
+        StringBuilder sb = new();
+        foreach (var (mod, dir) in Empty.OrderBy(x => x.Key.ScopeName))
+        {
+            sb.AppendLine(mod.ScopeName);
+            foreach (var (tar, man) in dir.Keys.Select(manip =>
+                (tar: manip.Target.GetSignature(source: true, celeste: false),
+                man: manip.Manip.Method.GetSignature(source: false))
+            ).OrderBy(b => b.man))
+            {
+                sb.Append('\t')
+                    .Append(man)
+                    .Append(" => ")
+                    .Append(tar)
+                    ;
+                sb.AppendLine();
+            }
+        }
+        return (Empty, sb.ToString());
+    }
+
+    //private static void GetDMD()
+    //{
+    //    Hook i = new(typeof(DynamicMethodDefinition).GetMethod("Generate", bf, [])!,
+    //    (Func<DynamicMethodDefinition, MethodInfo> orig, DynamicMethodDefinition self) =>
+    //    {
+    //        var t = orig(self);
+    //        _InsertDMD ??= orig(self);
+    //        return t;
+    //    });
+    //    ills.Add(new(typeof(ILCursor).GetMethod("_Insert", bf), i => { }));
+    //    i.Dispose();
+    //}
+
+    private static void IgnoreSelf()
     {
         var toremove = LatestManipLogs.Where(x =>
         {
-            var t = x.Key.Target.DeclaringType;
-            if (t == typeof(ILCursor) || t == typeof(DynamicMethodDefinition) || t == typeof(ILContext))
+            var t = x.Key.Manip.Method.DeclaringType.Module;
+            if (t == typeof(aaaModule).Module)
             {
-                return false;
+                return true;
             }
-            return true;
+            return false;
         });
+        foreach (var item in toremove)
+        {
+            LatestManipLogs.Remove(item.Key);
+        }
     }
 
     private static void Compare()
@@ -385,10 +480,12 @@ public class aaaModule : EverestModule
     }
 
     private static Lazy<FieldInfo> DetourManager_detourStates = new(() => typeof(DetourManager).GetField("detourStates", BindingFlags.Static | BindingFlags.NonPublic)!);
-
+    static Func<object, object>? fun1;
+    static Func<object, ILContext.Manipulator>? fun2;
     private static void RefreshHooks()
     {
-        //refresh doesnot exists.
+        // Replay all hooks.
+        //// refresh doesnot exists.
 
         foreach (MethodBase orig in ((IDictionary)DetourManager_detourStates.Value.GetValue(null)!).Keys)
         {
@@ -412,8 +509,10 @@ public class aaaModule : EverestModule
                 // ILHookInfo only gives us public access to the method the manipulator delegate calls.
                 // We need to retrieve the actual delegate passed to the original IL hook, as the manipulator method it calls may be non-static...
                 // Time to use monomod to access monomod internals :)
-                var hookState = new DynamicData(hook).Get("hook")!;
-                var manipulator = new DynamicData(hookState).Get<ILContext.Manipulator>("Manip")!;
+                fun1 ??= ReflectionHelper.GetGetter<object>(hook.GetType(), "hook");
+                var hookState = fun1(hook);
+                fun2 ??= ReflectionHelper.GetGetter<ILContext.Manipulator>(hookState.GetType(), "Manip");
+                var manipulator = fun2(hookState);
 
                 try
                 {
@@ -424,19 +523,18 @@ public class aaaModule : EverestModule
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log("USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
+                    Logger.Log(LogLevel.Error,"USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
                 }
             }
         }
     }
-
     public static void Prepare()
     {
-        foreach (var method in typeof(ILCursor).GetMethods().Where(x => x.DeclaringType == typeof(ILCursor)))
+        foreach (var method in typeof(ILCursor).GetMethods(bf).Where(x => x.DeclaringType == typeof(ILCursor)))
         {
             try
             {
-                ills.Add(new(method, AddLogger));
+                ills.Add(new(method, i => AddLogger(i, method.ToOperation())));
             }
             catch (Exception)
             {
@@ -471,10 +569,19 @@ public class aaaModule : EverestModule
         {
             m.Dispose();
         }
+        ls.Clear();
+        ills.Clear();
     }
 
     public override void Load()
     {
+        foreach (var method in typeof(ILCursor).GetMethods(bf).Where(x => x.DeclaringType == typeof(ILCursor)).Cast<MethodBase>()
+            .Append(typeof(DynamicMethodDefinition).GetConstructor([typeof(MethodBase)]))
+            .Append(typeof(ILContext).GetMethod("Invoke")).OfType<MethodBase>())
+        {
+            PlatformTriple.Current.TryDisableInlining(method);
+        }
+
     }
 
     public override void Unload()
