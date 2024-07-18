@@ -123,7 +123,7 @@ public static class MethodInfoExtensions
 
     public static string ToOperation(this MethodBase method)
     {
-        return $"{method.Name}({new string(
+        return $"{(method.DeclaringType == typeof(Instruction) ? "_Instruction_" : "")}{method.Name}({new string(
                         method
                         .GetParameters()
                         .SelectMany(x =>
@@ -281,7 +281,8 @@ public class aaaModule : EverestModule
         }
         public bool HasChanges()
         {
-            return Operation.StartsWith("_Insert(") || Operation.StartsWith("Emit") || Operation.StartsWith("Remove");
+            return Operation.StartsWith("_Insert(") || Operation.StartsWith("Emit") || Operation.StartsWith("Remove")
+                || Operation.StartsWith("_Instruction_set_");
         }
     }
     class LogInfo
@@ -403,7 +404,7 @@ public class aaaModule : EverestModule
             if (!log.Any(x => x.HasChanges()))
             {
                 empty.Add(manip, log);
-            }
+        }
         }
         (Empty, EmptyReport) = BuildReport(empty);
     }
@@ -523,14 +524,16 @@ public class aaaModule : EverestModule
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log(LogLevel.Error,"USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
+                    Logger.Log(LogLevel.Error, "USSRNAME.Stolen.MappingUtils.ILHookDiffer", $"Failed to apply IL hook {hook.ManipulatorMethod.GetID()}: {ex}");
                 }
             }
         }
     }
     public static void Prepare()
     {
-        foreach (var method in typeof(ILCursor).GetMethods(bf).Where(x => x.DeclaringType == typeof(ILCursor)))
+        var instr = typeof(Instruction).GetProperties(bf).Select(x => x.GetSetMethod());
+        foreach (var method in typeof(ILCursor).GetMethods(bf).Where(x => x.DeclaringType == typeof(ILCursor))
+            .Concat(instr))
         {
             try
             {
@@ -547,16 +550,32 @@ public class aaaModule : EverestModule
             orig(self, mb);
             Current.Target = mb;
         }));
+        Bottom = 1;
+        ills.Add(new(typeof(ILContext).GetMethod("Invoke")!,
+            il =>
+            {
+                static void m1(ILContext.Manipulator def)
+                {
+                    CurrentManipLogs.Clear();
+                    Current.Manip = def;
+                    Bottom--;
+                }
+                ILCursor ic = new(il);
+                ic.GotoNext(MoveType.Before, i => i.MatchCallOrCallvirt(out var method) 
+                                                && method.Name == "Invoke");
+                ic.EmitLdarg1();
+                ic.EmitDelegate(m1);
+                ic.Index++;
+                ic.EmitDelegate(m2);
 
-        ls.Add(new(typeof(ILContext).GetMethod("Invoke")!,
-            (Action<ILContext, ILContext.Manipulator> orig, ILContext self, ILContext.Manipulator def) =>
-        {
-            CurrentManipLogs.Clear();
-            Current.Manip = def;
-            orig(self, def);
-            LatestManipLogs[Current] = CurrentManipLogs;
-            CurrentManipLogs = [];
-        }));
+                static void m2()
+                {
+                    Bottom++;
+                    LatestManipLogs[Current] = CurrentManipLogs;
+                    CurrentManipLogs = [];
+                }
+
+            }));
     }
 
     public static void Clear()
@@ -575,13 +594,6 @@ public class aaaModule : EverestModule
 
     public override void Load()
     {
-        foreach (var method in typeof(ILCursor).GetMethods(bf).Where(x => x.DeclaringType == typeof(ILCursor)).Cast<MethodBase>()
-            .Append(typeof(DynamicMethodDefinition).GetConstructor([typeof(MethodBase)]))
-            .Append(typeof(ILContext).GetMethod("Invoke")).OfType<MethodBase>())
-        {
-            PlatformTriple.Current.TryDisableInlining(method);
-        }
-
     }
 
     public override void Unload()
